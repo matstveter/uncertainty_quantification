@@ -220,7 +220,6 @@ print(f"Calibrated: {nll_cal:.4f}")
 print(f"Improvement: {nll_raw - nll_cal:.4f}")
 print(f"Test Coverage: {test_coverage*100:.2f}% (Target: 95%)")
 
-# We must exponentiate to visualize the "Trumpet" or "Spike" in real terms
 y_true_real = torch.exp(y_test).numpy().flatten()
 y_pred_real = torch.exp(mu_log_cal).numpy().flatten()
 y_lower_real = torch.exp(low_log).numpy().flatten()
@@ -230,21 +229,17 @@ error_low = y_pred_real - y_lower_real
 error_high = y_upper_real - y_pred_real
 y_err_asym = [error_low, error_high]
 
-# Sort by True Price for clean plotting
 sort_idx = np.argsort(y_true_real)
 y_true_sorted = y_true_real[sort_idx]
 y_pred_sorted = y_pred_real[sort_idx]
 
-# Sort the errors using the same indices
 y_err_sorted = [error_low[sort_idx], error_high[sort_idx]]
 
-# Plot
 plt.figure(figsize=(12, 6))
-subset = 100 # Plot first 100 samples for clarity
+subset = 100
 
 plt.plot(range(subset), y_true_sorted[:subset], 'k--', label='True Price', alpha=0.8)
 
-# Note: yerr accepts shape (2, N) for asymmetric errors
 plt.errorbar(range(subset), y_pred_sorted[:subset], 
              yerr=[y_err_sorted[0][:subset], y_err_sorted[1][:subset]], 
              fmt='o', ecolor='green', color='blue', alpha=0.5, 
@@ -267,22 +262,15 @@ def audit_sharpness(y_true, y_pred, y_lower, y_upper):
     """
     Audits the "sharpness" and "adaptivity" of uncertainty intervals.
     """
-    # 1. Calculate Widths
     widths = y_upper - y_lower
     
-    # 2. Metric: MPIW (Mean Prediction Interval Width)
     mpiw = np.mean(widths)
     target_range = np.max(y_true) - np.min(y_true)
-    mpiw_vs_range = (mpiw / target_range) * 100  # As % of data range
+    mpiw_vs_range = (mpiw / target_range) * 100
     
-    # 3. Metric: Width Variability (Check for "Laziness")
-    # If std is 0, the model is just adding a constant buffer (Homoscedastic)
     width_std = np.std(widths)
     
-    # 4. Metric: Error-Uncertainty Correlation (The "Trust" correlation)
-    # do we get wider when we have higher error?
     abs_error = np.abs(y_true - y_pred)
-    # We use Spearman because the relationship is likely monotonic but not linear
     corr, _ = stats.spearmanr(widths, abs_error)
     
     print("--- SHARPNESS AUDIT ---")
@@ -291,16 +279,13 @@ def audit_sharpness(y_true, y_pred, y_lower, y_upper):
     print(f"Width Std Dev:           {width_std:.4f} (Higher implies adaptivity)")
     print(f"Error-Width Correlation: {corr:.4f} (Should be > 0)")
     
-    # Quick Visualization
     fig, ax = plt.subplots(1, 2, figsize=(12, 4))
     
-    # Histogram of widths (Check for laziness)
     ax[0].hist(widths, bins=30, alpha=0.7, color='teal')
     ax[0].set_title("Distribution of Interval Widths")
     ax[0].set_xlabel("Width")
     ax[0].set_ylabel("Frequency")
     
-    # Error vs Uncertainty
     ax[1].scatter(widths, abs_error, alpha=0.3, s=10)
     ax[1].set_title(f"Error vs Uncertainty (Corr: {corr:.2f})")
     ax[1].set_xlabel("Predicted Interval Width")
@@ -308,26 +293,20 @@ def audit_sharpness(y_true, y_pred, y_lower, y_upper):
     
     plt.show()
 
-# 1. Get Model Outputs (in Log Space)
 scaled_model.eval()
 with torch.no_grad():
     mu_log, lv_log = scaled_model(X_test)
     sigma_log = torch.exp(0.5 * lv_log)
 
-# 2. Calculate Bounds in Log Space FIRST
-# We apply the +/- 1.96 sigma HERE, in the Gaussian domain where the model was trained
 z_score = 1.96
 low_log  = mu_log - (z_score * sigma_log)
 high_log = mu_log + (z_score * sigma_log)
 
-# 3. Transform EVERYTHING back to Real Values ($$$)
-# We want to audit "Dollars", not "Log-Dollars"
 y_true_real = torch.exp(y_test).numpy().flatten()
 y_pred_real = torch.exp(mu_log).numpy().flatten()
 y_lower_real = torch.exp(low_log).numpy().flatten()
 y_upper_real = torch.exp(high_log).numpy().flatten()
 
-# 4. Run the Audit
 audit_sharpness(y_true_real, y_pred_real, y_lower_real, y_upper_real)
 
 # COMMAND ----------
@@ -337,17 +316,12 @@ import torch
 
 scaled_model.eval()
 with torch.no_grad():
-    # A. Validation Set (Calibration Data)
-    # y_val is ALREADY log-transformed (Log-Dollars)
     mu_val_log, log_var_val = scaled_model(X_val)
     sigma_val_log = torch.exp(0.5 * log_var_val)
     
-    # B. Test Set (Target Data)
-    # y_test is ALREADY log-transformed (Log-Dollars)
     mu_test_log, log_var_test = scaled_model(X_test)
     sigma_test_log = torch.exp(0.5 * log_var_test)
 
-# Convert to Numpy
 y_cal_log_true = y_val.numpy().flatten() 
 pred_cal_log   = mu_val_log.numpy().flatten()
 sigma_cal_log  = sigma_val_log.numpy().flatten()
@@ -355,15 +329,9 @@ sigma_cal_log  = sigma_val_log.numpy().flatten()
 pred_test_log  = mu_test_log.numpy().flatten()
 sigma_test_log = sigma_test_log.numpy().flatten()
 
-
-# --- 2. RUN CONFORMAL PREDICTION (LOG-SPACE) ---
-
 def apply_conformal_prediction(y_cal, pred_cal, sigma_cal, pred_test, sigma_test, alpha=0.05):
-    # 1. Calculate Non-Conformity Scores
-    # We are comparing Log-Truth to Log-Prediction. This is correct.
     scores = np.abs(y_cal - pred_cal) / sigma_cal
     
-    # 2. Find q_hat (95th percentile)
     q_level = np.ceil((len(y_cal) + 1) * (1 - alpha)) / len(y_cal)
     q_level = min(1.0, q_level)
     q_hat = np.quantile(scores, q_level, method='higher')
@@ -372,7 +340,6 @@ def apply_conformal_prediction(y_cal, pred_cal, sigma_cal, pred_test, sigma_test
     print(f"Standard Gaussian Multiplier: 1.96")
     print(f"Conformal Multiplier (q_hat): {q_hat:.4f}")
     
-    # 3. Apply q_hat to Test Data (Still in Log Space)
     cp_lower_log = pred_test - (q_hat * sigma_test)
     cp_upper_log = pred_test + (q_hat * sigma_test)
     
@@ -399,11 +366,10 @@ audit_sharpness(y_true_real, y_pred_real, cp_lower_real, cp_upper_real)
 import matplotlib.pyplot as plt
 import numpy as np
 
-# We use the back-transformed "Real Dollar" values calculated in the previous step
-y_true = y_true_real      # The actual prices
-y_pred = y_pred_real      # The exponentiated model mean
-cp_lower = cp_lower_real  # The exponentiated lower bound
-cp_upper = cp_upper_real  # The exponentiated upper bound
+y_true = y_true_real      
+y_pred = y_pred_real
+cp_lower = cp_lower_real
+cp_upper = cp_upper_real
 
 def plot_sorted_intervals(y_true, y_pred, y_lower, y_upper, num_points=100):
     """
@@ -419,25 +385,20 @@ def plot_sorted_intervals(y_true, y_pred, y_lower, y_upper, num_points=100):
     y_l_sample = y_lower[indices]
     y_u_sample = y_upper[indices]
 
-    # 2. Sort by Ground Truth (y_true)
     sort_idx = np.argsort(y_t_sample)
     y_t_sorted = y_t_sample[sort_idx]
     y_p_sorted = y_p_sample[sort_idx]
     y_l_sorted = y_l_sample[sort_idx]
     y_u_sorted = y_u_sample[sort_idx]
 
-    # 3. Plot
     plt.figure(figsize=(12, 6))
     
-    # Plot the Interval (Region)
     plt.fill_between(range(len(y_t_sorted)), y_l_sorted, y_u_sorted, 
                      color='gray', alpha=0.3, label='95% Confidence Interval')
     
-    # Plot the Predictions (Model)
     plt.plot(range(len(y_t_sorted)), y_p_sorted, color='blue', 
              linewidth=1.5, alpha=0.8, label='Prediction')
     
-    # Plot the Ground Truth (Reality)
     plt.scatter(range(len(y_t_sorted)), y_t_sorted, color='red', 
                 s=15, alpha=0.7, label='Ground Truth')
     
@@ -447,7 +408,6 @@ def plot_sorted_intervals(y_true, y_pred, y_lower, y_upper, num_points=100):
     plt.ylabel("Price ($100k)")
     plt.show()
 
-# --- 2. EXECUTION ---
 plot_sorted_intervals(y_true, y_pred, cp_lower, cp_upper, num_points=200)
 
 # COMMAND ----------
@@ -457,11 +417,8 @@ import seaborn as sns
 import numpy as np
 from scipy.stats import skew
 
-# Ensure y_true is a 1D numpy array
 y_target = y_test.numpy().flatten()
 
-# 1. Calculate Skewness
-# 0 = Normal, > 1 = Highly Skewed (Long Tail)
 skew_val = skew(y_target)
 
 print(f"--- TARGET DISTRIBUTION AUDIT ---")
@@ -474,7 +431,6 @@ elif skew_val < -1.0:
 else:
     print("Diagnosis: SYMMETRIC (Normal-ish)")
 
-# 2. Plot Histogram
 plt.figure(figsize=(10, 5))
 sns.histplot(y_target, kde=True, bins=30, color='purple', alpha=0.6)
 plt.title(f"Distribution of Target Values (Skew: {skew_val:.2f})")
@@ -489,16 +445,13 @@ plt.show()
 
 import numpy as np
 
-# 1. Pick a random test sample
 idx = np.random.randint(0, len(y_true_real))
 
-# 2. Extract the values (already in Real Dollars from previous step)
 true_price  = y_true_real[idx]
 pred_price  = y_pred_real[idx]
 lower_bound = cp_lower_real[idx]
 upper_bound = cp_upper_real[idx]
 
-# 3. Display the result
 print(f"--- DUMMY PREDICTION (Sample #{idx}) ---")
 print(f"True Value:       ${true_price * 100_000:,.2f}")
 print(f"Model Prediction: ${pred_price * 100_000:,.2f}")
